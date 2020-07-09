@@ -1,0 +1,2280 @@
+/*****************************************************************************************/
+/* Toppler (a.k.a. Perestroika) remake                                                   */
+/* version 1.0                                                                           */
+/* (c) 2005 Rene Puchinger                                                               */
+/*                                                                                       */
+/* Requires DirextX 7.0 or higher                                                        */
+/*                                                                                       */
+/* Features:                                                                             */
+/*   o freeware with source codes!                                                       */
+/*   o incorporates DirectDraw accelerated full screen mode 800x600 with 256 colors      */
+/*   o includes 6 original compositions played back via DirectMusic									     */
+/*   o incorporates DirectSound to play sounds                                           */ 
+/*   o one or more opponents (depends on the level)                                      */
+/*   o one or more moving aphid as a bonus                                               */
+/*                                                                                       */
+/* Remarks:                                                                              */
+/*   o there are constants you may change to see results, but note that changing         */
+/*     some specific constants can cause strange behaviour                               */
+/*                                                                                       */
+/*****************************************************************************************/
+
+#define WIN32_LEAN_AND_MEAN						/* don't include MFC stuff */
+#define DIRECTINPUT_VERSION 0x0700		/* use DirectInput version 7 */
+#include <fstream>
+#include <windows.h>
+#include <windowsx.h>
+#include <ddraw.h>
+#include <dinput.h>
+#include <mmreg.h>
+#include <dsound.h>
+#include <dmksctrl.h>
+#include <dmusici.h>
+#include <dmusicc.h>
+#include <dmusicf.h>
+#include <cmath>
+#include <ctime>
+#include "resource.h"
+
+using namespace std;
+
+/*****************************************************************************************/
+
+#define WNDCLASSNAME "TOPPLERCLASS"	/* window class name */
+#define APPNAME "Toppler"						/* application name */
+
+#define ST_QUIT 1										/* user wish to leave the game */
+#define ST_PLAYING 2								/* user plays the game */
+#define ST_DEATH 3									/* frog just died *sigh* */
+#define ST_LEVEL_COMPLETE 4					/* level completed */
+#define ST_MENU 5										/* user is in the menu */
+#define ST_VIEW_HS 6								/* viewing high score */
+#define ST_RECORD 7									/* record to high score */
+#define ST_WIN 8										/* the game is won */
+
+#define CFG_FN "toppler.cfg"				/* high score file name */
+#define PAL_FN "toppler.pal"				/* global palette file name */
+#define LVL_FN "toppler.lvl"				/* level info file name */
+#define WATER_FN "water%i.dat"			/* water background file names */
+#define ITEMS_FN "items.dat"				/* items file name */
+#define SOUND_FN "toppler%i.snd"		/* sound file names */
+#define MUSIC_FN "toppler%i.mus"		/* music file names */
+
+#define KEY_ENTRIES 20			/* number of entries in the keyboard data buffer */
+
+/* following defines are used for error handling */
+#define ERR_OK 0						/* no error */
+#define ERR_GENERIC 1				/* general error */
+#define ERR_MEMORY 2				/* not enough memory */
+#define ERR_MISSINGFILE 3		/* some file corrupted or not present */
+#define ERR_DDRAWINIT	4			/* DirectDraw initialization error */
+#define ERR_DDRAWGENERIC 5	/* general DirectDraw error */
+#define ERR_GRMODE 6				/* graphic mode can't be set */
+#define ERR_DINPUT 7				/* DirectInput failure */
+
+#define SCREENX 800				/* screen X resolution */
+#define SCREENY 600				/* screen Y resolution */
+#define WATERX 800				/* water X resolution */
+#define WATERY 560				/* water Y resolution */
+#define ITEMSX 881				/* items surface X resolution */
+#define ITEMSY 1274				/* items surface Y resolution */
+#define MENU_BEGINX	151		/* position of the menu */
+#define MENU_BEGINY 80
+#define HS_BEGINX 210			/* position of high score bar */
+#define HS_BEGINY 80
+#define RECORD_BEGINX 190	/* position of the record-to-high-score bar */
+#define RECORD_BEGINY 200
+#define WIN_BEGINX 177		/* position of the win message */
+#define WIN_BEGINY 160
+#define MENU_NUMITEMS 5		/* number of items in the menu */
+#define STATUSY 40				/* y size of the status bar */
+#define BPP 8							/* color depth, 8 => 256 colors, 16 => 65536 colors, etc. */
+#define COLORS (1 << BPP)	/* number of colors */
+#define FPS 25						/* frame rate */
+
+/* measure of water slowness - the higher the value, the slower animation */
+#define WATER_SLOWNESS 50
+#define WATER_FRAMES 3			/* we use 3 succesive frames for water animation */
+
+#define LAST_MOVEX 1			/* last fly movement was in x direction (used for better path search) */
+#define LAST_MOVEY 2			/* last fly movement was in y direction */
+
+#define APHID_FRAMES 9		/* number of frames for aphid animation */
+#define FLY_FRAMES 10			/* number of frames for big fly animation */
+#define ANIM 70						/* used for fly and aphid animation - see Pond::render() */
+
+#define TRANSCOL 0xff			/* transparent color in the surface of items */
+
+#define FIELDCOLS	19				/* number of columns in playing field */
+#define FIELDROWS	18				/* number of rows */
+#define NUMLEVELS 25				/* number of levels */
+#define NUMLILIES 20				/* number of water lilies */
+#define NUMRIPPLES 2				/* number of ending ripples */
+/* how fast to increase the score (which should be a multiple of this constant) */
+#define SCORE_SPEED 50
+/* the maximal status a lily can have, if it is exactly this value, the lily is not visible */
+#define MAXSTATUS 1000000		
+#define STAT_DENSITY (MAXSTATUS/(NUMLILIES+NUMRIPPLES))
+#define MAXANIMAL_STATUS 20000	/* used for fly & aphid speed manipulation */
+#define MAXFLIES 10							/* maximal number of flies in one level */
+#define MAXAPHIDS 10						/* maximal number of aphids in one level */
+#define MINANIMAL_SPEED 250			/* minimal fly & aphid speed */
+#define MAXANIMAL_SPEED 600			/* maximal fly & aphid speed */
+#define MAXATTEMPTS 8						/* maximal number of attempts a frog can possibly have */
+#define CHANGE_END_PERIOD	1400	/* how often possibly change the level ending lily */
+#define CHANGE_END_MINLEV 9			/* minimal level where the ending can be possibly changed */
+#define LILY_SIZEX 173					/* x size of a lily (with box) */
+#define LILY_SIZEY 110					/* y size of a lily */
+#define FROG_SIZEX 20						/* frog size */
+#define FROG_SIZEY 24
+#define NUMBER_SIZEX 13					/* size of a number literal */
+#define BONUS_RAD	6							/* radius of each bonus circle */
+#define STAR_SIZEX 30						/* size of ending level star */
+#define STAR_SIZEY 27
+#define FLY_SIZEX 33
+#define FLY_SIZEY 29
+#define APHID_SIZEX 20
+#define APHID_SIZEY 21
+#define CROSS_SIZEX 17
+#define CROSS_SIZEY 30
+#define CHAR_SIZEX 15
+#define MAX_NAME_LEN 11					/* maximal player name length (to high score) */
+#define NUM_NAMES 10						/* number of names in high score */
+#define BONUS_NEWLEVEL 1000
+#define BONUS_SMALL 300				/* small bonus */
+#define BONUS_BIG	2500				/* big bonus */
+#define BONUS_NEG (-1000)			/* negative "bonus" */
+#define BONUS_ADV 5500				/* adventure bonus */
+#define BONUS_ADVNEG (-5000)	/* unhappy adventure bonus */
+#define BONUS_APHID 7000			/* aphid bonus gain */
+#define ATTEMPTS_ADDUP 40000	/* add one attempt after reaching score of multiple of this value */
+/* following are the frog's possible directions */
+#define DIR_DOWN 0
+#define DIR_LEFT 1
+#define DIR_RIGHT 2
+#define DIR_UP 3
+/* minimal status a lily must have in order to move fly or aphid to it */
+#define TRESHOLD (NUMLILIES-2)*STAT_DENSITY
+
+#define NUMSOUNDS 17
+#define SND_FLYMOVE 0
+#define SND_FLYEATFROG 1
+#define SND_DEATH 2
+#define SND_NEWLIFE 3
+#define SND_ADVBONUS 4
+#define SND_APHIDMOVE 5
+#define SND_MENUCLICK 6
+#define SND_SMALLBONUS 7
+#define SND_NEGATIVE 8
+#define SND_FROGMOVE 9
+#define SND_RECORD 10
+#define SND_BIGBONUS 11
+#define SND_EXIT 12
+#define SND_WIN 13
+#define SND_FLYDEATH 14
+#define SND_APHIDEATEN 15
+#define SND_ENDLEVEL 16
+
+#define NUMMIDIS 6
+
+/*****************************************************************************************/
+
+/* folowing macro gets buffered keyboard input */
+#define GET_KEYBOARD_DATA DIDEVICEOBJECTDATA data_array[KEY_ENTRIES]; \
+	DWORD entries = KEY_ENTRIES; \
+	while (lpKeyboard->Acquire() == DIERR_INPUTLOST);	\
+	lpKeyboard->GetDeviceData(sizeof(DIDEVICEOBJECTDATA), data_array, &entries, 0); 
+
+/* flip backbuffer to primary surface */
+#define FLIP check_surf(lpSBack); \
+	check_surf(lpSPrimary); \
+	lpSPrimary->Flip(NULL, DDFLIP_WAIT);
+
+#define LOCK_FPS_PROLOGUE start_time = GetTickCount()	/* begin measuring ticks */
+#define LOCK_FPS_EPILOGUE while ((GetTickCount() - start_time) < (1/FPS)*1000);	/* lock frame rate to # FPS */
+#define KEY_DOWN(i) ((data_array[i].dwData & 0x80) != 0)	
+
+/*****************************************************************************************/
+/* following variables describe each object (ie. lily, cross, bonus) in terms */
+/* of their coordinates on the lpSItems surface */
+
+RECT LILIES_COORD[NUMLILIES+NUMRIPPLES] = {			/* lilies (incl. ending ripples) */
+	{1, 1, 174, 111}, {175, 1, 348, 111}, {349, 1, 522, 111}, {523, 1, 696, 111},
+	{1, 112, 174, 222}, {175, 112, 348, 222}, {349, 112, 522, 222}, {523, 112, 696, 222},
+	{1, 223, 174, 333}, {175, 223, 348, 333}, {349, 223, 522, 333}, {523, 223, 696, 333},
+	{1, 334, 174, 444}, {175, 334, 348, 444}, {349, 334, 522, 444}, {523, 334, 696, 444},
+	{52, 476, 225, 586}, {226, 484, 399, 593}, {417, 445, 590, 555}, {591, 445, 764, 555},
+	{417, 556, 590, 666}, {591, 556, 764, 666}
+};
+RECT STAR_COORD = {13, 458, 40, 482};						/* red star (level end) */
+RECT BONUS_SMALL_COORD = {61, 455, 73, 466};		/* small bonus (blue) */
+RECT BONUS_BIG_COORD = {92, 455, 104, 466};			/* big bonus (orange) */
+RECT BONUS_ADV_COORD = {123, 455, 135, 466};		/* adventure (grey) */
+RECT BONUS_NEG_COORD = {154, 455, 166, 466};		/* negative 'bonus' (brown square) */
+RECT CROSS_COORD = {1, 523, 18, 553};						/* cross (death) */
+RECT FROG_COORD[] = {
+	{176, 445, 193, 466},													/* frog - up to down */
+	{194, 445, 212, 466},													/* frog - right to left */
+	{232, 445, 251, 466},													/* frog - left to right */
+	{213, 445, 231, 467}													/* frog - down to up */
+};
+RECT FLY_COORD[] = {														/* big fly */
+	{280, 445, 307, 474}, {280, 445, 307, 474},
+	{252, 445, 279, 474}, {280, 445, 307, 474},
+	{308, 445, 335, 474}, {280, 445, 307, 474},
+	{336, 445, 369, 474}, {280, 445, 307, 474},
+	{280, 445, 307, 474}, {370, 445, 403, 474}
+};
+RECT APHID_COORD[] = {													/* aphid */
+	{1, 593, 21, 614}, {22, 593, 42, 614},
+	{1, 593, 21, 614}, {22, 593, 42, 614},
+	{43, 593, 65, 614},	{1, 593, 21, 614},
+	{22, 593, 42, 614}, {1, 593, 21, 614},
+	{66, 593, 88, 614}
+};
+RECT STATUS_COORD = {0, 667, 800, 707};					/* status bar */
+RECT NUMBERS[10] = {														/* numbers 0 - 9 */
+	{1, 710, 14, 726}, {15, 710, 28, 726},
+	{29, 710, 42, 726}, {43, 710, 56, 726},
+	{57, 710, 70, 726}, {71, 710, 84, 726},
+	{85, 710, 98, 726}, {99, 710, 112, 726},
+	{113, 710, 126, 726}, {127, 710, 140, 726}
+};
+RECT FIRST_CHAR = {1, 1100, 16, 1118};					/* coords of the first character literal */
+RECT MENU_COORD = {1, 727, 505, 1031};					/* main menu */
+RECT HS_COORD = {506, 727, 880, 1031};					/* high score */
+RECT RECORD_COORD = {1, 1119, 405, 1183};				/* record to high score */
+RECT NOTICE_COORD = {0, 1059, 800, 1099};				/* notice how to close the menu */
+RECT WIN_COORD = {407, 1119, 841, 1273};				/* game-won notice */
+RECT BALL_COORD = {1, 571, 21, 591};						/* ball used in menu */
+RECT VOLUME_COORD = {29, 523, 31, 539};					/* sound/music volume indicator */
+
+/*****************************************************************************************/
+
+int error = ERR_OK;		/* variable for checking errors */
+char* error_msg[] = {"", "Unknown error!", "Not enough memory!",
+	"Some file(s) corrupted. Please reinstall the game!",
+	"DirectDraw can't initialize. Make sure you have DirectX 7 or above installed!",
+	"Unknown DirectX error!",
+	"Can't set graphic mode to 800x600 with 256 colors!", "Can't initialize DirectInput!"};
+	
+HWND hwnd;						/* the application handle, initialised by Game::Game() */
+LPDIRECTDRAW7 lpDD = NULL;							/* DirectDraw object */
+LPDIRECTDRAWPALETTE lpPal = NULL;				/* the one and only palette */
+LPDIRECTDRAWSURFACE7 lpSPrimary = NULL;	/* primary surface */
+LPDIRECTDRAWSURFACE7 lpSBack = NULL;		/* back buffer surface */
+LPDIRECTDRAWSURFACE7 lpSItems = NULL;		/* all items - water lilies, frog, etc. */
+LPDIRECTDRAWSURFACE7 lpSScreen[WATER_FRAMES];	/* main screen (water) */
+LPDIRECTINPUT lpDI = NULL;							/* DirectInput object */
+LPDIRECTINPUTDEVICE lpKeyboard = NULL;
+LPDIRECTSOUND lpDS = NULL;							/* DirectSound object */
+LPDIRECTSOUNDBUFFER lpSound[NUMSOUNDS];	/* buffers for all the sounds */
+IDirectMusicPerformance* lpDM = NULL;		/* DirectMusic performance */
+IDirectMusicLoader* lpLoader = NULL;		/* DirectMusic loader (for loading MIDI files) */
+IDirectMusicSegment* lpMusic[NUMMIDIS];	/* Segments representing all the midis */
+IDirectMusicSegmentState* lpStates[NUMMIDIS];	/* Segment states */
+
+PALETTEENTRY pal[COLORS];								/* palette structure, to be filled from file */
+bool play_sound;												/* true if sound supported */
+int sound_volume = 3;										/* can be 0..3. now set to highest */
+bool play_music;												/* true if music supported */
+int music_volume = 3;										/* can be 0..3. now set to highest */
+
+/*****************************************************************************************/
+
+/* entry in high score */
+struct HighScoreEntry {
+	char name[MAX_NAME_LEN+1];		/* including the ending zero */
+	DWORD score;
+};
+
+/* info about each level, to be read from file */
+class LevelInfo {
+	BYTE cols;						/* number of used columns */
+	BYTE rows;						/* number of used rows */
+	BYTE start_lily;			/* index of the starting lily */
+	BYTE xspacing;				/* number of pixels as a distance between each two lilies */
+	BYTE yspacing;
+	BYTE xtrim;						/* number of pixels to trim from left and right side of the lily */
+	BYTE ytrim;						/* number of pixels to trim from upper and down side of the lily */
+	BYTE xoffset;					/* offset of the left-topmost lily on the screen */
+	BYTE yoffset;
+	WORD min_decay;				/* minimal decay of lilies */
+	WORD decay_spread;		/* maximal value to add to decay */
+	WORD start_lily_decay;/* decay of the starting lily */
+	WORD delay_start_min;	/* minimal value of the delay before lily is visible */
+	WORD delay_start_max;	/* maximal value of the delay before lily is visible */
+	BYTE bonus_small;			/* probability (in %) of small bonus */
+	BYTE bonus_neg;				/* etc. */
+	BYTE bonus_adv;
+	BYTE bonus_big;
+	BYTE fly;							/* probability (in %) of fly creation */
+	BYTE maxflies;				/* maximal number of flies */
+	BYTE aphid;						/* probability (in %) of aphid creation */
+	BYTE maxaphids;				/* maximal number of aphids */
+	friend class Pond;
+};
+
+class Fly {							/* represents an opponent fly */
+	bool alive;						/* true if the fly is alive */
+	WORD speed;						/* speed of movement */
+	WORD cnt;							/* counter of iterations */
+	int posx;							/* position in the pond */
+	int posy;
+	int last_move;				/* used for smarter path finding, see Pond::move_fly() */
+	friend class Pond;
+};
+
+class Aphid {
+	bool alive;
+	WORD speed;
+	WORD cnt;
+	int posx;
+	int posy;
+	friend class Pond;
+};
+
+/* water lily with bonuses etc. */
+class Lily {
+	/* how big or small the lily is, smaller values indicate more recently created lily
+	 and conversely, larger values (up to MAXSTATUS) represent smaller lily */
+	DWORD status;
+	WORD decay;							/* how fast the lily decays */
+	int bonus;							/* optional bonus or adventure (not including aphid) */
+	WORD delay_start;				/* how many cycles to delay before the lily is created */
+	WORD delay_cnt;					/* counter of cycles for delay_start */
+	friend class Pond;
+};
+
+class Pond {
+	Lily field[FIELDCOLS][FIELDROWS];	/* playing field,in lover levels only a subset is used */
+	LevelInfo levels[NUMLEVELS];			/* detailed info about each level */
+	Fly flies[MAXFLIES];							/* the opponents */
+	Aphid aphids[MAXAPHIDS];					/* the aphids (moving bonus) */
+	int fly_cnt;											/* counter of the flies */
+	int aphid_cnt;
+	int frog_posx;										/* position of the frog */
+	int frog_posy;
+	int adv_posx;											/* position of the adventure bonus (-1 if not present) */
+	int adv_posy;
+	int frog_direction;								/* direction of frog, set to DIR_XXX */
+	int start_posx;										/* starting point of the frog */
+	int start_posy;
+	int end_posx;											/* position of the end-level star (may vary) */
+	int end_posy;
+	/* check if fly at an index died and take appropriate action */
+	void check_fly_death(int index, int level);
+	int dist(int x, int y);						/* return distance of frog from lily at x,y  */
+	/* move fly to the next lily according to its intelligence */
+	void move_fly(int index, int level);
+	void check_aphid_death(int index, int level);	/* check if aphid is dead, not including eating */
+	void move_aphid(int index, int level);
+public:
+	Pond();
+	void blit_bg();										/* blit the background - moving water */
+	/* test if the movement to a new location, given by the virtual key code is possible */	
+	bool possible(BYTE vk_code, int level);
+	void move_frog(BYTE vk_code);			/* move frog to new location according to vk_code */
+	void create_aphid(int level);			/* create one aphid */
+	void create_fly(int level);				/* create one fly */
+	bool aphid_eaten();								/* true if the frog has eaten some aphid */
+	bool is_death(int level);					/* check if the frog is dead */
+	bool is_level_complete();					/* check if level finished */
+	void make_death(int level);				/* make the frog dead when taking death adventure */
+	bool exist_fly();									/* check if there is some fly */
+	void destroy_fly();								/* destroy one fly (in case of appropriate adventure) */
+	void reset(int level);						/* resets the pond for given level */
+	/* blit a lily from field[i][j] to the backbuffer surface */
+	void blit_lily(int i, int j, int index, int level);
+	/* blit the lilies to backbuffer, if display_frog == false, don't show the frog */
+	void render(int level, bool display_frog = true);
+	/* reduce the size of all lilies according to Lily::decay, create new lilies
+	according to the probability PROB_CREATE, move the opponent, etc. return true
+	if the frog is alive, false if dead */
+	void advance(int level);
+	int get_frog_bonus();							/* return the bonus at frog position and clear it */
+};
+ 
+/* the game class - water, lilies, score, etc. */
+class Game {
+	int state;												/* actual state of the game, set to ST_XXX */
+	HighScoreEntry hs[NUM_NAMES];			/* high score */
+	Pond pond;
+	int level;												/* game level (0..NUMLEVELS-1) */
+	int attempts;											/* number of lives or attempts */
+	DWORD score;											/* game score */
+	DWORD added_attempts;								/* attempts added for score, not including adventure */
+	bool show_notice;									/* see show_menu() decl. */
+	void show_status();								/* display level, score etc. */
+	void respond_to_player();					/* check player action and respond to it */
+	void new_game();									/* begin new game from the first level */
+	void new_level();									/* begin new level */
+	/* attempt to play actual level again, if there's no attempt left, return false */
+	bool new_attempt();
+	void render();										/* convert the contents of game to the screen */
+	void inc_attempts();							/* increase number of attempts by 1 */
+	void advance();										/* move objects */
+	void show_hs();										/* show high score */
+	void show_win();									/* show the win message */
+	void record_hs();									/* record to high score if possible */
+public:
+	Game(HINSTANCE hInstance);				/* init everything */
+	/* show main menu, if show_notice true, display also a notice how to close the menu */
+	void show_menu();
+	bool run();												/* the main loop, return false when exiting */
+	~Game();													/* destroy everything */
+};
+
+/*****************************************************************************************/
+
+DWORD file_size(const char* fn);	/* get file size, called before file opened */
+/* blit item specified by its coords from lpSItems to [x,y] on lpSBack */
+void blit_item(DWORD x, DWORD y, RECT& src_coords);
+void check_surf(LPDIRECTDRAWSURFACE7 surf);	/* restore lost surface */
+int loadlvl(const char* fn, LevelInfo* levinfo);	/* load LevelInfo from fn */
+int loadpal(const char* fn);	/* load palette from fn, return error code */
+/* load picture to surface, return err.code */
+int loadpic(const char* fn, LPDIRECTDRAWSURFACE7 surf, int szx, int szy);	
+int loadcfg(const char* fn, HighScoreEntry* hs);	/* loads the config file */
+void savecfg(const char* fn, HighScoreEntry* hs);
+int loadsnd(const char* fn, LPDIRECTSOUNDBUFFER buf);	/* load sound to a buffer */
+/* load a midi to a segment */
+int loadmus(const char* fn, IDirectMusicSegment** seg); 
+void play_snd(int snd_number);		/* play sound according to a number of type SND_XXX */
+void stop_snd(int snd_number);		/* stop sound playing */
+bool is_snd_playing(int snd_number); /* determines whether sound is playing */
+void play_mus(int mus_number);		/* play music according to MUS_XXX */
+void stop_mus(int mus_number);		/* stop music playing */
+bool is_mus_playing(int mus_number);	/* determines whether music is playing */
+bool is_mus_playing();	/* same as above except it checks all music segments */
+void decrease_music();
+void decrease_sound();
+void increase_music();
+void increase_sound();
+void apply_sound_vol();	/* apply the sound volume specified by sound_volume */
+void apply_music_vol();
+void show_soundvol();		/* show sound volume indicator on the menu */
+void show_musicvol();		/* show music volume indicator */
+void show_number(int x, int y, DWORD number); /* write a number to backbuffer */
+void show_text(int x, int y, char* text);			/* write a text to backbuffer */
+/* get text input, return true if pressed ENTER */
+bool get_text(char* text, int max_len);
+void flush_keyboard();	/* flush keyboard buffer */
+unsigned __int64 checksum(ifstream& fin);	/* returns the sum of all characters in a file */
+int check_files();	/* check if all files are correct, except for CFG_FN, which varies */
+void fade_in();			/* fades in the screen when starting the game */
+void fade_out();		/* fade out the screen, used when exiting */
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
+
+/*****************************************************************************************/
+
+Pond::Pond():
+	frog_posx(0), frog_posy(0), start_posx(0), start_posy(0), end_posx(0), end_posy(0),
+	frog_direction(0), fly_cnt(0), adv_posx(-1), adv_posy(-1)
+{
+	if (check_files() != ERR_OK)
+		return;
+	
+	/* load level info from file */
+	if (loadlvl(LVL_FN, levels) != ERR_OK)
+		return;
+}
+
+/*****************************************************************************************/
+
+void Pond::create_aphid(int level) {
+	if (aphid_cnt == MAXAPHIDS)
+		return;
+	aphids[aphid_cnt].alive = true;
+	aphids[aphid_cnt].speed = rand()%(MAXANIMAL_SPEED-MINANIMAL_SPEED) + MINANIMAL_SPEED;
+	aphids[aphid_cnt].cnt = 0;
+	/* generate aphid's coordinates, but not too close to the frog */
+	aphids[aphid_cnt].posx = rand()%(levels[level].cols - 4) + 4;
+	aphids[aphid_cnt].posy = rand()%(levels[level].rows - 4);
+	field[aphids[aphid_cnt].posx][aphids[aphid_cnt].posy].status = levels[level].start_lily * STAT_DENSITY;
+	aphid_cnt++;
+}
+
+/*****************************************************************************************/
+
+void Pond::create_fly(int level) {
+	if (fly_cnt == MAXFLIES)
+		return;
+	flies[fly_cnt].alive = true;
+	flies[fly_cnt].speed = rand()%(MAXANIMAL_SPEED-MINANIMAL_SPEED) + MINANIMAL_SPEED;
+	flies[fly_cnt].cnt = 0;
+	flies[fly_cnt].last_move = LAST_MOVEY;
+	if (rand()%100 < 80)	/* 80 % chance that the fly will start in right corner */
+		flies[fly_cnt].posx = levels[level].cols-1;
+	else									/* 20 % chance that the fly will start in left corner */
+		flies[fly_cnt].posx = 0;
+	/* similarly set the y-position */
+	if (flies[fly_cnt].posx == levels[level].cols-1 && rand()%100 < 50) {
+		flies[fly_cnt].posy = levels[level].rows-1;
+		flies[fly_cnt].last_move = LAST_MOVEX;
+	}
+	else flies[fly_cnt].posy = 0;
+	/* now set properly the attributes of the lily where last fly was created */
+	field[flies[fly_cnt].posx][flies[fly_cnt].posy].status = levels[level].start_lily * STAT_DENSITY;
+	field[flies[fly_cnt].posx][flies[fly_cnt].posy].decay = levels[level].start_lily_decay;
+	fly_cnt++;
+}
+
+/*****************************************************************************************/
+
+void Pond::check_fly_death(int index, int level) {
+	const int x = flies[index].posx;
+	const int y = flies[index].posy;
+	if (field[x][y].status >= NUMLILIES*STAT_DENSITY) {
+    play_snd(SND_FLYDEATH);
+		flies[index].alive = false;
+		if (adv_posx != -1)
+			field[adv_posx][adv_posy].bonus = 0;	/* clear adventure bonus, if any */
+		field[x][y].bonus = BONUS_ADV;	/* set new adventure on former fly's position */
+		field[x][y].status = levels[level].start_lily * STAT_DENSITY;
+		adv_posx = x;
+		adv_posy = y;
+	}
+}
+
+/*****************************************************************************************/
+
+int Pond::dist(int x, int y) {
+	return (frog_posx - x)*(frog_posx - x) + (frog_posy - y)*(frog_posy - y);
+}
+
+/*****************************************************************************************/
+
+void Pond::move_fly(int index, int level) {
+	const int x = flies[index].posx;
+	const int y = flies[index].posy;
+	/* first try to find a move with a lame method */
+	int newx = x;
+	int newy = y;
+	int bestdist = FIELDROWS*FIELDROWS+FIELDCOLS*FIELDCOLS;
+	if (x > 0 && dist(x-1, y) < bestdist && field[x-1][y].status < TRESHOLD) {
+		newx = x-1; newy = y;
+		bestdist = dist(newx, newy);
+	}
+	if (x < levels[level].cols-1 && dist(x+1, y) < bestdist && field[x+1][y].status < TRESHOLD) {
+		newx = x+1; newy = y;
+		bestdist = dist(newx, newy);
+	}
+	if (y > 0 && dist(x, y-1) < bestdist && field[x][y-1].status < TRESHOLD) {
+		newx = x; newy = y-1;
+		bestdist = dist(newx, newy);
+	}
+	if (y < levels[level].rows-1 && dist(x, y+1) < bestdist && field[x][y+1].status < TRESHOLD) {
+		newx = x; newy = y+1;
+		bestdist = dist(newx, newy);
+	}
+	/* if the fly not moved yet (ie. the lame method failed), check if it can find better path */
+	if (newx == x && newy == y && flies[index].last_move == LAST_MOVEX) {
+		if (y > 0 && field[x][y-1].status < TRESHOLD) newy--;
+		else if (y < levels[level].rows-1 && field[x][y+1].status < TRESHOLD) newy++;
+	}
+	else if (newx == x && newy == y && flies[index].last_move == LAST_MOVEY) {
+		if (x > 0 && field[x-1][y].status < TRESHOLD) newx--;
+		else if (x < levels[level].cols-1 && field[x+1][y].status < TRESHOLD) newx++;
+	}
+	/* must go to a safer place, if such exists */
+	if (newx == x && newy == y && field[x][y].status >= TRESHOLD) {
+		if (x > 0 && field[x-1][y].status < TRESHOLD) newx--;
+		else if (x < levels[level].cols-1 && field[x+1][y].status < TRESHOLD) newx++;
+		else if (y > 0 && field[x][y-1].status < TRESHOLD) newy--;
+		else if (y < levels[level].rows-1 && field[x][y+1].status < TRESHOLD) newy++;
+	}
+	if (newx != x)					/* fly moved in the x direction */
+		flies[index].last_move = LAST_MOVEX;
+	else if (newy != y)
+		flies[index].last_move = LAST_MOVEY;	/* fly moved in the y direction */
+	flies[index].posx = newx;
+	flies[index].posy = newy;
+	/* 15% chance that the fly turns positive bonus to negative */
+	if (field[newx][newy].bonus == BONUS_SMALL && rand()%100 < 15) {
+		field[newx][newy].bonus = BONUS_NEG;
+		field[newx][newy].status = levels[level].start_lily * STAT_DENSITY;
+	}
+	/* if the fly moved, there is 40% chance to play a sound */
+	if ((newx != x || newy != y) && rand()%100 < 40)
+		play_snd(SND_FLYMOVE);
+}
+
+/*****************************************************************************************/
+
+void Pond::check_aphid_death(int index, int level) {
+	const int x = aphids[index].posx;
+	const int y = aphids[index].posy;
+	if (field[x][y].status >= NUMLILIES*STAT_DENSITY) {
+    play_snd(SND_APHIDMOVE);
+		aphids[index].alive = false;
+		field[x][y].bonus = BONUS_BIG;	/* set big bonus on former aphid location */
+		field[x][y].status = levels[level].start_lily * STAT_DENSITY;
+	}
+}
+
+/*****************************************************************************************/
+
+void Pond::move_aphid(int index, int level) {
+	const int x = aphids[index].posx;
+	const int y = aphids[index].posy;
+	int newx = x;
+	int newy = y;
+	int bestdist = 0;
+	if (x > 0 && dist(x-1, y) > bestdist && field[x-1][y].status < TRESHOLD) {
+		newx = x-1; newy = y;
+		bestdist = dist(newx, newy);
+		/* try to get away from the level ending, where the frog will probably go */
+		if (end_posx == levels[level].cols - 1) bestdist += dist(newx, newy)/3;			
+	}
+	if (x < levels[level].cols-1 && dist(x+1, y) > bestdist && field[x+1][y].status < TRESHOLD) {
+		newx = x+1; newy = y;
+		bestdist = dist(newx, newy);
+		if (end_posx == 0) bestdist += dist(newx, newy)/3;
+	}
+	if (y > 0 && dist(x, y-1) > bestdist && field[x][y-1].status < TRESHOLD) {
+		newx = x; newy = y-1;
+		bestdist = dist(newx, newy);
+		if (end_posy == levels[level].rows - 1) bestdist += dist(newx, newy)/3;
+	}
+	if (y < levels[level].rows-1 && dist(x, y+1) > bestdist && field[x][y+1].status < TRESHOLD) {
+		newx = x; newy = y+1;
+		bestdist = dist(newx, newy);
+		if (end_posy == 0) bestdist += dist(newx, newy)/3;
+	}
+	/* must go to a safer place, if such exists */
+	if (newx == x && newy == y && field[x][y].status >= TRESHOLD) {
+		if (x > 0 && field[x-1][y].status < TRESHOLD) newx--;
+		else if (x < levels[level].cols-1 && field[x+1][y].status < TRESHOLD) newx++;
+		else if (y > 0 && field[x][y-1].status < TRESHOLD) newy--;
+		else if (y < levels[level].rows-1 && field[x][y+1].status < TRESHOLD) newy++;
+	} 
+	aphids[index].posx = newx;
+	aphids[index].posy = newy;
+	/* if the aphid moved, there is 40% chance to play a sound */
+	if ((newx != x || newy != y) && rand()%100 < 40)
+		play_snd(SND_APHIDMOVE);
+}
+
+/*****************************************************************************************/
+
+bool Pond::aphid_eaten() {
+	for (int i = 0; i < aphid_cnt; i++) 
+		if (aphids[i].alive && frog_posx == aphids[i].posx && frog_posy == aphids[i].posy) {
+			aphids[i].alive = false;
+			play_snd(SND_APHIDEATEN);
+			return true;
+		}
+	return false;
+}
+
+/*****************************************************************************************/
+
+bool Pond::exist_fly() {
+	if (fly_cnt == 0)
+		return false;
+	int num_flies = 0;
+	for (int i = 0; i < fly_cnt; i++)
+		if (flies[i].alive) num_flies++;
+  return (num_flies > 0);
+}
+
+/*****************************************************************************************/
+
+void Pond::destroy_fly() {
+	for (int i = 0; i < fly_cnt; i++) 
+		if (flies[i].alive) {
+			play_snd(SND_FLYDEATH);
+			flies[i].alive = false;
+			return;
+		}
+}
+
+/*****************************************************************************************/
+
+void Pond::blit_bg() {
+	static int water_counter = 0;	/* used for water animation */
+	static int water_index = 0;		/* index of currently viewed water screen */
+	if (water_counter == 0) {			/* proceed with new frame ? */
+		water_index++;
+		water_index %= WATER_FRAMES;
+	}
+	water_counter++;
+	water_counter %= WATER_SLOWNESS;
+	
+	/* blit the game background */
+	check_surf(lpSBack);
+	check_surf(lpSScreen[water_index]);
+	lpSBack->BltFast(0, 0, lpSScreen[water_index], NULL, DDBLTFAST_NOCOLORKEY | DDBLTFAST_WAIT);
+}
+
+/*****************************************************************************************/
+
+bool Pond::possible(BYTE vk_code, int level) {
+	switch(vk_code) {
+		case DIK_DOWN: return (frog_posy < levels[level].rows-1);
+		case DIK_LEFT: return (frog_posx > 0);
+		case DIK_RIGHT: return (frog_posx < levels[level].cols-1);
+		case DIK_UP: return (frog_posy > 0);
+	}
+	return false;
+}
+
+/*****************************************************************************************/
+
+void Pond::move_frog(BYTE vk_code) {
+	play_snd(SND_FROGMOVE);
+	switch(vk_code) {
+		case DIK_DOWN: frog_posy++; frog_direction = DIR_DOWN; break;
+		case DIK_LEFT: frog_posx--; frog_direction = DIR_LEFT; break;
+		case DIK_RIGHT: frog_posx++; frog_direction = DIR_RIGHT;  break;
+		case DIK_UP: frog_posy--; frog_direction = DIR_UP;
+	}
+}
+
+/*****************************************************************************************/
+
+void Pond::make_death(int level) {
+	play_snd(SND_DEATH);
+	field[frog_posx][frog_posy].status = NUMLILIES*STAT_DENSITY;
+	is_death(level);
+}
+
+/*****************************************************************************************/
+
+bool Pond::is_death(int level) {
+	/* first check if the frog was eaten by a fly */
+	for (int i = 0; i < fly_cnt; i++) {
+		if (flies[i].alive && frog_posx == flies[i].posx && frog_posy == flies[i].posy) {
+			play_snd(SND_FLYEATFROG);
+			render(level, false);		/* hide the frog */
+			FLIP;
+			Sleep(800);
+			return true;
+		}
+	}
+	/* now check if frog is out of a lily */
+	if (field[frog_posx][frog_posy].status >= NUMLILIES*STAT_DENSITY) {
+		/* draw ripples and a cross */
+		play_snd(SND_DEATH);
+		render(level, false);		/* hide the frog */
+		blit_lily(frog_posx, frog_posy, NUMLILIES, level);
+		FLIP;
+		Sleep(200);
+		render(level, false);
+		blit_lily(frog_posx, frog_posy, NUMLILIES+1, level);
+		FLIP;
+		Sleep(200);
+		int x = levels[level].xoffset + frog_posx*(LILY_SIZEX + levels[level].xspacing - 2*levels[level].xtrim);
+		int y = levels[level].yoffset + frog_posy*(LILY_SIZEY + levels[level].yspacing - 2*levels[level].ytrim);
+		x += (LILY_SIZEX - 2*levels[level].xtrim - CROSS_SIZEX)/2;
+		y += (LILY_SIZEY - 2*levels[level].ytrim - CROSS_SIZEY)/2;
+		render(level, false);
+		blit_item(x, y, CROSS_COORD);
+		FLIP;
+		Sleep(800);
+		return true;
+	}
+	return false;
+}
+
+/*****************************************************************************************/
+
+bool Pond::is_level_complete() {
+	return (frog_posx == end_posx && frog_posy == end_posy);
+}
+
+/*****************************************************************************************/
+
+void Pond::reset(int level) {
+	fly_cnt = 0;
+	aphid_cnt = 0;
+	start_posx = 0;
+	start_posy = levels[level].rows-1;
+	frog_posx = start_posx;
+	frog_posy = start_posy;
+	frog_direction = DIR_DOWN;
+	end_posx = levels[level].cols-1;
+	end_posy = 0;
+	WORD delay_max = levels[level].delay_start_max;
+	WORD delay_min = levels[level].delay_start_min;
+	/* set all the lilies */
+	for (int i = 0; i < levels[level].cols; i++) 
+		for (int j = 0; j < levels[level].rows; j++) {
+			field[i][j].status = MAXSTATUS;
+			field[i][j].bonus = 0;		/* clear bonus of a lily */
+			/* set possible bonus */
+			if (rand()%100 < levels[level].bonus_small)
+				field[i][j].bonus = BONUS_SMALL;
+			else if (rand()%100 < levels[level].bonus_neg)
+				field[i][j].bonus = BONUS_NEG;
+			/* adventure can be set only once */
+			else if (adv_posx == -1 && rand()%100 < levels[level].bonus_adv) {
+				field[i][j].bonus = BONUS_ADV;
+				adv_posx = i;
+				adv_posy = j;
+			} else if (rand()%100 < levels[level].bonus_big)
+				field[i][j].bonus = BONUS_BIG;
+			field[i][j].delay_start = rand()%(delay_max - delay_min) + delay_min;
+			field[i][j].delay_cnt = 0;
+			field[i][j].decay = levels[level].min_decay + (rand()%levels[level].decay_spread);
+			if (field[i][j].bonus == BONUS_ADV || field[i][j].bonus == BONUS_NEG)
+				field[i][j].status = levels[level].start_lily * STAT_DENSITY;
+		}
+	field[start_posx][start_posy].status = levels[level].start_lily * STAT_DENSITY;
+	field[start_posx][start_posy].bonus = 0;
+	field[start_posx][start_posy].decay = levels[level].start_lily_decay; 
+	field[end_posx][end_posy].status = levels[level].start_lily * STAT_DENSITY;
+	field[end_posx][end_posy].bonus = 0;
+	/* create flies */
+	for (int i = 0; i < levels[level].maxflies; i++) 
+		if (rand()%100 < levels[level].fly) 
+			create_fly(level);
+	/* create aphids */
+	for (int i = 0; i < levels[level].maxaphids; i++)
+		if (rand()%100 < levels[level].aphid) 
+			create_aphid(level);
+}
+
+/*****************************************************************************************/
+
+void Pond::blit_lily(int i, int j, int index, int level) {
+	int x = levels[level].xoffset + i*(LILY_SIZEX + levels[level].xspacing - 2*levels[level].xtrim);
+	int y = levels[level].yoffset + j*(LILY_SIZEY + levels[level].yspacing - 2*levels[level].ytrim);
+	RECT lily_coords = LILIES_COORD[index];
+	lily_coords.left += levels[level].xtrim;	/* trim the lily boundaries to appropriate level */
+	lily_coords.right -= levels[level].xtrim;
+	lily_coords.top += levels[level].ytrim;
+	lily_coords.bottom -= levels[level].ytrim;
+	blit_item(x, y, lily_coords);			/* blit the lily */
+}
+
+/*****************************************************************************************/
+
+void Pond::render(int level, bool display_frog) {
+	int x, y;
+	/* first blit the water background */
+	blit_bg();
+	/* now blit each water lily in its actual state */
+	for (int i = 0; i < levels[level].cols; i++) 
+		for (int j = 0; j < levels[level].rows; j++) {
+			if (i == frog_posx && j == frog_posy && field[i][j].status >= NUMLILIES*STAT_DENSITY)
+				continue;	/* don't show the two ripples if the frog is obviously dead */
+			if (field[i][j].status < MAXSTATUS-20) {	/* 20 is a tolerance for computing index below */
+				int index = (int) floor((double) field[i][j].status / STAT_DENSITY);
+				blit_lily(i, j, index, level);
+			}
+			/* blit a bonus, if any */
+			if (field[i][j].status < NUMLILIES*STAT_DENSITY && field[i][j].bonus != 0) {
+				RECT bonus_coords;
+				switch(field[i][j].bonus) {		/* is there any bonus? */
+					case BONUS_BIG: bonus_coords = BONUS_BIG_COORD; break;
+					case BONUS_ADV: bonus_coords = BONUS_ADV_COORD; break;
+					case BONUS_NEG: bonus_coords = BONUS_NEG_COORD; break;
+					default: bonus_coords = BONUS_SMALL_COORD; break;
+				}
+				x = levels[level].xoffset + i*(LILY_SIZEX + levels[level].xspacing - 2*levels[level].xtrim);
+				y = levels[level].yoffset + j*(LILY_SIZEY + levels[level].yspacing - 2*levels[level].ytrim);
+				x += (LILY_SIZEX - 2*levels[level].xtrim)/2 - BONUS_RAD;
+				y += (LILY_SIZEY - 2*levels[level].ytrim)/2 - BONUS_RAD;
+				blit_item(x, y, bonus_coords);
+			}
+		}
+	/* now blit the end of level marker, if the frog isn't there yet */
+	if (!is_level_complete()) {
+		x = levels[level].xoffset + end_posx*(LILY_SIZEX + levels[level].xspacing - 2*levels[level].xtrim);
+		y = levels[level].yoffset + end_posy*(LILY_SIZEY + levels[level].yspacing - 2*levels[level].ytrim);
+		x += (LILY_SIZEX - 2*levels[level].xtrim - STAR_SIZEX)/2 + 1;
+		y += (LILY_SIZEY - 2*levels[level].ytrim - STAR_SIZEY)/2;
+		blit_item(x, y, STAR_COORD);
+	}
+	/* blit frog to its location */
+	if (display_frog) {
+		x = levels[level].xoffset + frog_posx*(LILY_SIZEX + levels[level].xspacing - 2*levels[level].xtrim);
+		y = levels[level].yoffset + frog_posy*(LILY_SIZEY + levels[level].yspacing - 2*levels[level].ytrim);
+		x += (LILY_SIZEX - 2*levels[level].xtrim - FROG_SIZEX)/2 + 2;
+		y += (LILY_SIZEY - 2*levels[level].ytrim - FROG_SIZEY)/2 - 3;
+		blit_item(x, y, FROG_COORD[frog_direction]);
+	}
+	static int fly_frame = 0;		/* frame of fly animation */
+	static int fly_frame_cnt = 0;
+	static int aphid_frame = 0;	/* frame of aphid animation */
+	static int aphid_frame_cnt = 0;
+	/* now blit all flies */
+	if (fly_frame_cnt++ >= ANIM) {
+		fly_frame_cnt = 0;
+		fly_frame++;
+		fly_frame %= FLY_FRAMES;
+		aphid_frame_cnt = 0;
+		aphid_frame++;
+		aphid_frame %= APHID_FRAMES;
+	}
+	for (int i = 0; i < fly_cnt; i++) {
+		if (!flies[i].alive)		/* skip dead flies */
+			continue;
+		x = levels[level].xoffset + flies[i].posx*(LILY_SIZEX + levels[level].xspacing - 2*levels[level].xtrim);
+		y = levels[level].yoffset + flies[i].posy*(LILY_SIZEY + levels[level].yspacing - 2*levels[level].ytrim);
+		x += (LILY_SIZEX - 2*levels[level].xtrim - FLY_SIZEX)/2 + 1;
+		y += (LILY_SIZEY - 2*levels[level].ytrim - FLY_SIZEY)/2 - 6;
+		blit_item(x, y, FLY_COORD[fly_frame]);
+	}
+	/* at last blit all aphids */
+	for (int i = 0; i < aphid_cnt; i++) {
+		if (!aphids[i].alive)		/* skip dead aphids */
+			continue;
+		x = levels[level].xoffset + aphids[i].posx*(LILY_SIZEX + levels[level].xspacing - 2*levels[level].xtrim);
+		y = levels[level].yoffset + aphids[i].posy*(LILY_SIZEY + levels[level].yspacing - 2*levels[level].ytrim);
+		x += (LILY_SIZEX - 2*levels[level].xtrim - APHID_SIZEX)/2;
+		y += (LILY_SIZEY - 2*levels[level].ytrim - APHID_SIZEY)/2 - 2;
+		blit_item(x, y, APHID_COORD[aphid_frame]);
+	}
+}
+
+/*****************************************************************************************/
+
+void Pond::advance(int level) {
+	/* first reduce the sizes of all lilies according to Lily::decay */
+	for (int i = 0; i < levels[level].cols; i++) 
+		for (int j = 0; j < levels[level].rows; j++) {
+			if (i == end_posx && j == end_posy)
+				continue;		/* skip ending lily */
+			if (field[i][j].bonus == BONUS_ADV || field[i][j].bonus == BONUS_NEG)
+				continue;		/* also skip adventure and negative bonuses */ 
+			if (field[i][j].status + field[i][j].decay < MAXSTATUS) /* add to size if possible */
+				field[i][j].status += field[i][j].decay;
+			else {	/* if not possible, it means the lily is dead */
+				field[i][j].status = MAXSTATUS; /* now render() won't display the lily */
+				if (field[i][j].delay_cnt++ == field[i][j].delay_start) {
+					field[i][j].delay_cnt = 0;
+					WORD delay_max = levels[level].delay_start_max;
+					WORD delay_min = levels[level].delay_start_min;
+					field[i][j].delay_start = rand()%(delay_max - delay_min) + delay_min;
+					field[i][j].status = levels[level].start_lily * STAT_DENSITY;
+					if (i != start_posx || j != start_posy) 	/* change decay only for non-start lily */
+						field[i][j].decay = levels[level].min_decay + (rand()%levels[level].decay_spread);
+				}
+			}
+		}
+	/* advance all flies */
+	for (int i = 0; i < fly_cnt; i++) {
+		if (!flies[i].alive) continue;
+		if ((flies[i].cnt += flies[i].speed) >= MAXANIMAL_STATUS) {
+			flies[i].cnt = 0;
+			move_fly(i, level);
+		}
+		check_fly_death(i, level);
+	}
+	/* advance all aphids */
+	for (int i = 0; i < aphid_cnt; i++) {
+		if (!aphids[i].alive) continue;
+		if ((aphids[i].cnt += aphids[i].speed) >= MAXANIMAL_STATUS) {
+			aphids[i].cnt = 0;
+			move_aphid(i, level);
+		}
+		check_aphid_death(i, level);
+	}
+	/* each CHANGE_END_PERIOD iterations there is a chance to change the level ending */
+	static int change_cnt = 0;
+	if (level >= CHANGE_END_MINLEV && change_cnt++ == CHANGE_END_PERIOD) {
+		change_cnt = 0;
+		int pond_diag = levels[level].cols*levels[level].cols + levels[level].rows*levels[level].rows;
+		if (dist(end_posx, end_posy) < pond_diag/4) {
+			if (rand()%100 < 20) end_posx = (end_posx == 0) ? levels[level].cols - 1 : 0;
+			if (rand()%100 < 20) end_posy = (end_posy == 0) ? levels[level].rows - 1 : 0;
+			field[end_posx][end_posy].status = levels[level].start_lily * STAT_DENSITY;
+			field[end_posx][end_posy].bonus = 0;
+		}
+	}
+}
+
+/*****************************************************************************************/
+
+int Pond::get_frog_bonus() {
+	int res = field[frog_posx][frog_posy].bonus;
+	field[frog_posx][frog_posy].bonus = 0;
+	return res;
+}
+
+/*****************************************************************************************/
+
+Game::Game(HINSTANCE hInstance):
+	state(ST_MENU), level(0), score(0), added_attempts(0), attempts(2), show_notice(false)
+{
+	if (error != ERR_OK) return;
+
+	srand((unsigned)time(NULL));
+
+	CoInitialize(NULL);		/* we must do it because of DirectMusic */
+
+	/* load palette from file */
+	if (loadpal(PAL_FN) != ERR_OK) 
+		return;
+
+	/* load configuration (ie. high score + sound volumes) from file */
+	if (loadcfg(CFG_FN, hs) != ERR_OK)
+		return;
+
+	/* create and register window class */
+	WNDCLASSEX wnd;	/* the window class */
+	wnd.cbSize = sizeof(wnd);
+	wnd.style = 0;
+	wnd.lpfnWndProc = (WNDPROC) WndProc;
+	wnd.cbWndExtra = 0;
+	wnd.cbClsExtra = 0;
+	wnd.hInstance = hInstance;
+	wnd.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+	wnd.hIconSm = LoadIcon(NULL, IDI_APPLICATION);
+	wnd.hCursor = LoadCursor(NULL, IDC_ARROW);
+	wnd.hbrBackground = (HBRUSH) GetStockObject(BLACK_BRUSH);
+	wnd.lpszMenuName = NULL;
+	wnd.lpszClassName = WNDCLASSNAME;
+	if (!RegisterClassEx(&wnd)) {
+		error = ERR_GENERIC;
+		return;
+	}
+	
+	/* create the topmost window */
+	if (!(hwnd = CreateWindowEx(0, WNDCLASSNAME, APPNAME,	WS_VISIBLE | WS_POPUP,
+		0, 0, SCREENX, SCREENY,
+		NULL,	NULL,	hInstance, NULL))) {
+			error = ERR_GENERIC;
+			return;
+		}
+
+	/* hide the mouse cursor */
+	ShowCursor(FALSE);
+
+	/* create DirectInput object */
+	if (FAILED(DirectInputCreate(hInstance, DIRECTINPUT_VERSION, &lpDI, NULL))) {
+		error = ERR_DINPUT;
+		return;
+	}
+
+	/* create keyboard device */
+	if (FAILED(lpDI->CreateDevice(GUID_SysKeyboard, &lpKeyboard, NULL))) {
+		error = ERR_DINPUT;
+		return;
+	}
+
+	/* set the keyboard cooperative level */
+	if (FAILED(lpKeyboard->SetCooperativeLevel(hwnd, DISCL_BACKGROUND | DISCL_NONEXCLUSIVE))) {
+		error = ERR_DINPUT;
+		return;
+	}
+
+	/* set the keyboard data format to the default one */
+	if (FAILED(lpKeyboard->SetDataFormat(&c_dfDIKeyboard))) {
+		error = ERR_DINPUT;
+		return;
+	}
+
+	/* set keyboard buffered mode */
+	DIPROPDWORD diprop;
+	diprop.diph.dwSize = sizeof(DIPROPDWORD);
+	diprop.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+	diprop.diph.dwObj = 0;
+	diprop.diph.dwHow = DIPH_DEVICE;
+	diprop.dwData = KEY_ENTRIES;
+	if (FAILED(lpKeyboard->SetProperty(DIPROP_BUFFERSIZE, &diprop.diph))) {
+		error = ERR_DINPUT;
+		return;
+	}
+
+	/* acquire the keyboard */
+	if (FAILED(lpKeyboard->Acquire())) {
+		error = ERR_DINPUT;
+		return;
+	}
+
+	/* create the DirectSound object */
+	play_sound = SUCCEEDED(DirectSoundCreate(NULL, &lpDS, NULL));
+
+	/* set the DirectSound cooperative level */
+	play_sound = play_sound && SUCCEEDED(lpDS->SetCooperativeLevel(hwnd, DSSCL_NORMAL));
+
+	/* create sound buffers and load a sound to them */
+	DSBUFFERDESC dsbd;
+	WAVEFORMATEX wavefmt;
+	for (int i = 0; i < NUMSOUNDS; i++)
+		lpSound[i] = NULL;
+	for (int i = 0; i < NUMSOUNDS; i++) {
+		ZeroMemory(&wavefmt, sizeof(wavefmt));
+		wavefmt.wFormatTag = WAVE_FORMAT_PCM;		/* we will work only with PCM */
+		wavefmt.nChannels = 1;									/* mono */
+		wavefmt.nSamplesPerSec = 22050;
+		wavefmt.wBitsPerSample = 8;
+		wavefmt.nBlockAlign = 1;								/* # of channels * bytes per sample */
+		wavefmt.nAvgBytesPerSec = wavefmt.nSamplesPerSec * wavefmt.nBlockAlign;
+		wavefmt.cbSize = 0;
+		ZeroMemory(&dsbd, sizeof(dsbd));
+		dsbd.dwSize = sizeof(dsbd);
+		dsbd.dwFlags = DSBCAPS_CTRLVOLUME | DSBCAPS_STATIC;
+		char fn[20];
+		sprintf(fn, SOUND_FN, i+1);
+		dsbd.dwBufferBytes = file_size(fn);
+		dsbd.lpwfxFormat = &wavefmt;
+		play_sound = play_sound && SUCCEEDED(lpDS->CreateSoundBuffer(&dsbd, &lpSound[i], NULL));
+		if (loadsnd(fn, lpSound[i]) != ERR_OK) return;
+	}
+
+	/* after having DirectSound created, let's create DirectMusicPerformance object,
+	   which also creates DirectMusic object */
+	play_music = SUCCEEDED(CoCreateInstance(CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC,
+		IID_IDirectMusicPerformance, (LPVOID*) &lpDM));
+	if (play_sound)
+		play_music = play_music && SUCCEEDED(lpDM->Init(NULL, lpDS, hwnd));
+	else
+		play_music = play_music && SUCCEEDED(lpDM->Init(NULL, NULL, hwnd));
+	/* add a Microsoft Software Wavetable Synthesizer to the performance */
+	play_music = play_music && SUCCEEDED(lpDM->AddPort(NULL));
+	/* create the DirectMusic loader to be able to load midi files */
+	play_music = play_music && SUCCEEDED(CoCreateInstance(CLSID_DirectMusicLoader, NULL,
+		CLSCTX_INPROC, IID_IDirectMusicLoader, (LPVOID*) &lpLoader));
+
+	for (int i = 0; i < NUMMIDIS; i++) {
+		lpMusic[i] = NULL;
+		lpStates[i] = NULL;
+	}
+	/* load all midis */
+	for (int i = 0; i < NUMMIDIS; i++) {
+		char fn[20];
+		sprintf(fn, MUSIC_FN, i+1);
+		if (loadmus(fn, &lpMusic[i]) != ERR_OK) return;
+	}
+
+	/* create the DirectDraw object */
+	if (FAILED(DirectDrawCreateEx(NULL, (LPVOID*)&lpDD, IID_IDirectDraw7, NULL))) {
+		error = ERR_DDRAWINIT;
+		return;
+	}
+
+	/* set the DirectDraw cooperative level & display mode */
+	if (FAILED(lpDD->SetCooperativeLevel(hwnd, DDSCL_FULLSCREEN | DDSCL_EXCLUSIVE))) {
+		error = ERR_DDRAWINIT;
+		return;
+	}
+	if (FAILED(lpDD->SetDisplayMode(SCREENX, SCREENY, BPP, 0, 0))) {
+		error = ERR_GRMODE;
+		return;
+	}
+
+	/* create primary surface and one backbuffer for double buffering */
+	DDSURFACEDESC2 ddsd;
+	ZeroMemory(&ddsd, sizeof(ddsd));
+	ddsd.dwSize = sizeof(ddsd);
+	ddsd.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;
+	ddsd.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX;
+	ddsd.dwBackBufferCount = 1;
+	if (FAILED(lpDD->CreateSurface(&ddsd, &lpSPrimary, NULL))) {
+		error = ERR_DDRAWGENERIC;
+		return;
+	}
+	DDSCAPS2 ddcaps;
+	ZeroMemory(&ddcaps, sizeof(ddcaps));
+	ddcaps.dwCaps = DDSCAPS_BACKBUFFER;
+	if (FAILED(lpSPrimary->GetAttachedSurface(&ddcaps, &lpSBack))) {
+		error = ERR_DDRAWGENERIC;
+		return;
+	}
+
+	/* create palette and attach it to the primary surface */
+	if (FAILED(lpDD->CreatePalette(DDPCAPS_8BIT | DDPCAPS_INITIALIZE, pal, &lpPal, NULL))) {
+		error = ERR_DDRAWGENERIC;
+		return;
+	}
+	if (FAILED(lpSPrimary->SetPalette(lpPal))) {
+		error = ERR_DDRAWGENERIC;
+		return;
+	} 
+
+	/* create three screen surfaces from image (water) */
+	for (int i = 0; i < WATER_FRAMES; i++)		/* just to be pedant */
+		lpSScreen[i] = NULL;
+	for (int i = 0; i < WATER_FRAMES; i++) {
+		ZeroMemory(&ddsd, sizeof(ddsd));
+		ddsd.dwSize = sizeof(ddsd);
+		ddsd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
+		ddsd.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN;
+		ddsd.dwWidth = WATERX;
+		ddsd.dwHeight = WATERY;
+		if (FAILED(lpDD->CreateSurface(&ddsd, &lpSScreen[i], NULL))) {
+			error = ERR_DDRAWGENERIC;
+			return;
+		}
+		char fn[20];
+		sprintf(fn, WATER_FN, i+1);
+		if (loadpic(fn, lpSScreen[i], WATERX, WATERY) != ERR_OK)
+			return;
+	}
+
+	/* create items surface from image */
+	ZeroMemory(&ddsd, sizeof(ddsd));
+	ddsd.dwSize = sizeof(ddsd);
+	ddsd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_CKSRCBLT;
+	ddsd.ddckCKSrcBlt.dwColorSpaceLowValue = TRANSCOL;
+	ddsd.ddckCKSrcBlt.dwColorSpaceHighValue = TRANSCOL;
+	ddsd.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN;
+	ddsd.dwWidth = ITEMSX;
+	ddsd.dwHeight = ITEMSY;
+	if (FAILED(lpDD->CreateSurface(&ddsd, &lpSItems, NULL))) {
+		error = ERR_DDRAWGENERIC;	
+		return;
+	}
+	if (loadpic(ITEMS_FN, lpSItems, ITEMSX, ITEMSY) != ERR_OK)
+		return;
+
+	apply_sound_vol();
+	apply_music_vol();
+}
+
+/*****************************************************************************************/
+
+void Game::inc_attempts() {
+	if (attempts < MAXATTEMPTS) {
+		stop_snd(SND_NEWLIFE);
+		play_snd(SND_NEWLIFE);
+		attempts++;
+	}
+}
+
+/*****************************************************************************************/
+
+void Game::advance() {
+	pond.advance(level);	/* first advance the lilies, flies and aphids */
+	DWORD old_score = score;
+	if (pond.aphid_eaten())
+		score += BONUS_APHID;
+	int bonus = pond.get_frog_bonus();	/* get the bonus and clear it */
+	/* check if the frog takes some bonus */
+	if (bonus < 0 && score <= -BONUS_NEG) {
+		score = 0;	/* we don't want the score to be negative */
+		stop_snd(SND_NEGATIVE);
+		play_snd(SND_NEGATIVE);
+	}
+	else if (bonus != BONUS_ADV) {	/* not an adventure? */
+		score += bonus;
+		if (bonus < 0) {
+			stop_snd(SND_NEGATIVE);		
+			play_snd(SND_NEGATIVE);
+		}
+		else if (bonus == BONUS_SMALL) {
+			stop_snd(SND_SMALLBONUS);
+			play_snd(SND_SMALLBONUS);
+		}
+		else if (bonus == BONUS_BIG) {
+			stop_snd(SND_BIGBONUS);
+			play_snd(SND_BIGBONUS);
+		}
+	}
+	else {	/* randomly determine the type of adventure */
+		int adv = rand()%7;
+		switch(adv) {
+			case 0:		/* positive bonus */
+				play_snd(SND_ADVBONUS);
+				score += BONUS_ADV;
+				break;
+			case 1:		/* death */
+				pond.make_death(level);
+				state = ST_DEATH;
+				break;			
+			case 2:		/* negative bonus */
+				play_snd(SND_NEGATIVE);
+				if (score <= -BONUS_ADVNEG) score = 0;
+				else score += BONUS_ADVNEG;
+				break;
+			case 3:		/* add one attempt */
+				inc_attempts();
+				break;
+			case 4:
+				play_snd(SND_FLYMOVE);
+				pond.create_fly(level);
+				break;
+			case 5:
+				play_snd(SND_APHIDMOVE);
+				pond.create_aphid(level);
+				break;
+			case 6:
+				if (pond.exist_fly())
+					pond.destroy_fly();	/* get rid of one fly if there is one */
+				else
+					inc_attempts();			/* if there's fly, add an attempt instead */
+				break;
+		}
+	}
+	/* add attempts if gained appropriate score */
+	if ((__int64)score/ATTEMPTS_ADDUP - (__int64)old_score/ATTEMPTS_ADDUP >= 1 &&
+			added_attempts < score/ATTEMPTS_ADDUP)
+	{
+		added_attempts++;	
+		inc_attempts();
+	}
+	static int music_check_cnt = 0;
+	/* for performance reasons, test if music if playing only every 100th iterations */
+	if (music_check_cnt++ == 100) {
+		music_check_cnt = 0;
+		if (!is_mus_playing())					/* play random song */
+			play_mus(rand()%NUMMIDIS);
+	}
+}
+
+/*****************************************************************************************/
+
+void Game::respond_to_player() {
+	GET_KEYBOARD_DATA;
+	for (DWORD i = 0; i < entries; i++) {
+		if (pond.is_death(level)) {
+			state = ST_DEATH;
+			return;
+		}
+		if (pond.is_level_complete()) {
+			state = ST_LEVEL_COMPLETE;
+			return;
+		}
+		if (data_array[i].dwOfs == DIK_ESCAPE && KEY_DOWN(i)) {
+			state = ST_MENU;
+			return;
+		}
+		switch(data_array[i].dwOfs) {
+			case DIK_DOWN:
+				if (KEY_DOWN(i) && pond.possible(DIK_DOWN, level))
+					pond.move_frog(DIK_DOWN);
+				break;
+			case DIK_LEFT:
+				if (KEY_DOWN(i) && pond.possible(DIK_LEFT, level))
+					pond.move_frog(DIK_LEFT);
+				break;
+			case DIK_RIGHT:
+				if (KEY_DOWN(i) && pond.possible(DIK_RIGHT, level))
+					pond.move_frog(DIK_RIGHT);
+				break;
+			case DIK_UP:
+				if (KEY_DOWN(i) && pond.possible(DIK_UP, level))
+					pond.move_frog(DIK_UP);
+				break;
+		}
+	}
+	/* is the frog staying long time on one lily? */
+	state = pond.is_death(level) ? ST_DEATH : ST_PLAYING;
+}
+
+/*****************************************************************************************/
+
+void Game::show_status() { 
+	static DWORD score_cnt = 0;	/* used for slow increasing/decreasing of score */
+	if (score_cnt  < score)
+		score_cnt += SCORE_SPEED;	/* in case of increasing score */
+	if (score_cnt > score)
+		score_cnt -= SCORE_SPEED;	/* in case of decreasing score */
+	if (state != ST_PLAYING)		/* when not playing, display score immediately */
+		score_cnt = score;
+	blit_item(0, SCREENY - STATUSY, STATUS_COORD);
+	show_number(100, SCREENY - 27, level+1);
+	show_number(637, SCREENY - 27, score_cnt);
+	for (int i = 0; i < attempts; i++) {
+		blit_item(305 + i*(FROG_SIZEX+9), SCREENY-29, FROG_COORD[DIR_DOWN]);
+	}
+}
+
+/*****************************************************************************************/
+
+void Game::new_level() {
+	srand((unsigned)rand());		/* initialize random number generator */
+	play_snd(SND_ENDLEVEL);
+	Sleep(1000);
+	flush_keyboard();
+	score += BONUS_NEWLEVEL;
+	if (++level == NUMLEVELS) {
+		level--;	
+		state = ST_WIN;
+	}
+	else {
+		pond.reset(level);
+		state = ST_PLAYING;
+	}
+}
+
+/*****************************************************************************************/
+
+void Game::new_game() {
+	srand((unsigned)rand());		/* initialize random number generator */
+	level = 0;	// 0
+	score = 0;
+	added_attempts = 0;
+	attempts = 2;
+	pond.reset(level);
+	show_status();
+	state = ST_PLAYING;
+	flush_keyboard();
+}
+
+/*****************************************************************************************/
+
+bool Game::new_attempt() {
+	if (attempts-- == 0)
+		return false;
+	pond.reset(level);
+	state = ST_PLAYING;
+	flush_keyboard();
+	return true;
+}
+
+/*****************************************************************************************/
+
+void Game::render() {
+	/* now blit the pond, how it should appear on the screen */
+	pond.render(level);
+
+	/* show level, lives, score etc. */
+	show_status();
+
+	/* flip everything to the primary surface */
+	FLIP;
+}
+
+/*****************************************************************************************/
+
+void Game::show_hs() {
+#define DIGITS(n) (((int) floor(log10((double) n))) + 1)	/* compute number of digits */
+	state = ST_VIEW_HS;
+	pond.blit_bg();
+	blit_item(HS_BEGINX, HS_BEGINY, HS_COORD);
+	for (DWORD i = 0; i < NUM_NAMES; i++) {
+		show_number(HS_BEGINX + 17, HS_BEGINY + 50 + 21*(i+1), i+1);
+		show_text(HS_BEGINX + 62, HS_BEGINY + 50 + 21*(i+1), hs[i].name);
+		/* delta is simply used for right side align of scores - it looks better */
+		int delta = (NUMBER_SIZEX)*(9 - DIGITS(hs[i].score));
+		show_number(HS_BEGINX + 240 + delta, HS_BEGINY + 50 + 21*(i+1), hs[i].score);
+	}
+	GET_KEYBOARD_DATA;
+	if ((data_array[0].dwOfs == DIK_ESCAPE || data_array[0].dwOfs == DIK_RETURN) && KEY_DOWN(0))
+		state = ST_MENU;
+	show_status();
+	FLIP;
+	if (!is_mus_playing())					/* play random song */
+		play_mus(rand()%NUMMIDIS);
+}
+
+/*****************************************************************************************/
+
+void Game::show_win() {
+	/* play the sound only once */
+	static bool snd_playing = false;
+	if (!snd_playing) {
+		play_snd(SND_WIN);
+		snd_playing = true;
+	}
+	state = ST_WIN;
+	pond.blit_bg();
+	blit_item(WIN_BEGINX, WIN_BEGINY, WIN_COORD);
+	show_status();
+	/* show a stupid animation */
+	static int fly_frame = 0;
+	static int fly_frame_cnt = 0;
+	if ((fly_frame_cnt+=2) >= ANIM) {
+		fly_frame_cnt = 0;
+		fly_frame++;
+		fly_frame %= FLY_FRAMES;
+	}
+	blit_item(WIN_BEGINX+15, WIN_BEGINY+90, FLY_COORD[fly_frame]);
+	blit_item(WIN_BEGINX+65, WIN_BEGINY+90, FLY_COORD[fly_frame]);
+	blit_item(WIN_BEGINX+340, WIN_BEGINY+90, FLY_COORD[fly_frame]);
+	blit_item(WIN_BEGINX+390, WIN_BEGINY+90, FLY_COORD[fly_frame]);
+	FLIP;
+	GET_KEYBOARD_DATA;
+	if ((data_array[0].dwOfs == DIK_ESCAPE || data_array[0].dwOfs == DIK_RETURN) && KEY_DOWN(0)) {
+		flush_keyboard();	
+		snd_playing = false;
+		state = ST_RECORD;
+	}
+	if (!is_mus_playing())					/* play random song */
+		play_mus(rand()%NUMMIDIS);
+}
+
+/*****************************************************************************************/
+
+void Game::record_hs() { 
+	static bool computed = false;
+	static bool entered = false;
+	static int i;
+	state = ST_RECORD;
+	if (!computed && score <= hs[NUM_NAMES-1].score) {
+		state = ST_VIEW_HS;
+		return;	/* nothing to record */
+	}
+	static bool snd_playing = false;
+	if (!snd_playing) {
+		play_snd(SND_RECORD);
+		snd_playing = true;
+	}
+	if (!computed) {		/* compute the index i to hs[] only first time */
+		for (i = 0; i < NUM_NAMES && hs[i].score >= score; i++);
+		for (int j = NUM_NAMES-1; j > i; j--) {
+			hs[j].score = hs[j-1].score;
+			strcpy(hs[j].name, hs[j-1].name);
+		}
+		strcpy(hs[i].name, "");
+		hs[i].score = score;
+		computed = true;
+	}
+	pond.blit_bg();
+	blit_item(RECORD_BEGINX, RECORD_BEGINY, RECORD_COORD);
+	show_status();
+	entered = get_text(hs[i].name, MAX_NAME_LEN);
+	show_text(RECORD_BEGINX + 202, RECORD_BEGINY + 27, hs[i].name);
+	FLIP;
+	if (entered) {
+		computed = false;
+		Sleep(200);
+		savecfg(CFG_FN, hs);
+		snd_playing = false;
+		state = ST_VIEW_HS;
+	}
+	if (!is_mus_playing())					/* play random song */
+		play_mus(rand()%NUMMIDIS);
+}
+
+/*****************************************************************************************/
+
+void Game::show_menu() {
+#define MENU_ITEM_NEW 0			/* new game */
+#define MENU_ITEM_HS 1			/* high score */
+#define MENU_ITEM_MUSIC 2		/* music volume */
+#define MENU_ITEM_SOUND 3		/* sound volume */
+#define MENU_ITEM_EXIT 4		/* exit game */
+	static int active_item = 0;		/* active menu item */
+	static bool fading = true;	/* true initially when performing screen fade in */
+	if (!is_mus_playing())					/* play random song */
+		play_mus(rand()%NUMMIDIS);
+	state = ST_MENU;
+	pond.blit_bg();
+	blit_item(MENU_BEGINX, MENU_BEGINY, MENU_COORD);
+	if (show_notice)
+		blit_item(0, 0, NOTICE_COORD);
+	DWORD ballx1;	DWORD bally1;	DWORD ballx2;	DWORD bally2;
+	switch (active_item) {
+		case MENU_ITEM_NEW: ballx1 = 155; bally1 = 104; ballx2 = 332; break;
+		case MENU_ITEM_HS: ballx1 = 145; bally1 = 132; ballx2 = 338; break;
+		case MENU_ITEM_MUSIC: ballx1 = 130; bally1 = 162; ballx2 = 355; break;
+		case MENU_ITEM_SOUND: ballx1 = 126; bally1 = 215; ballx2 = 357; break;
+		case MENU_ITEM_EXIT: ballx1 = 191; bally1 = 269; ballx2 = 290; break;
+	}
+	bally2 = bally1;
+	blit_item(MENU_BEGINX + ballx1, MENU_BEGINY + bally1, BALL_COORD);		/* blit balls */
+	blit_item(MENU_BEGINX + ballx2, MENU_BEGINY + bally2, BALL_COORD);
+	show_status();
+	show_musicvol();
+	show_soundvol();
+	FLIP;
+	if (fading) {
+		fade_in();
+		fading = false;
+	}
+	GET_KEYBOARD_DATA;
+	if (KEY_DOWN(0)) {		/* just read the first keypress */
+		switch(data_array[0].dwOfs) {
+			case DIK_DOWN:
+				play_snd(SND_MENUCLICK);
+				active_item++;
+				active_item %= MENU_NUMITEMS;
+				break;
+			case DIK_LEFT: 
+				if (active_item == MENU_ITEM_MUSIC)
+					decrease_music();
+				if (active_item == MENU_ITEM_SOUND) {
+					decrease_sound();
+					play_snd(SND_MENUCLICK);
+				}
+				break;
+			case DIK_RIGHT:
+				if (active_item == MENU_ITEM_MUSIC)
+					increase_music();
+				if (active_item == MENU_ITEM_SOUND) {
+					increase_sound();
+					play_snd(SND_MENUCLICK);
+				}
+				break;
+			case DIK_UP:
+				play_snd(SND_MENUCLICK);
+				active_item--;
+				if (active_item < 0) active_item = MENU_NUMITEMS-1;
+				break;
+			case DIK_ESCAPE:
+				flush_keyboard();
+				if (show_notice) state = ST_PLAYING;	/* close the menu (only when playing game) */
+				break;
+			case DIK_RETURN:
+				if (active_item == MENU_ITEM_NEW) new_game();
+				else if (active_item == MENU_ITEM_EXIT) state = ST_QUIT;
+				else if (active_item == MENU_ITEM_HS) state = ST_VIEW_HS;
+				break;
+		}
+	}
+}
+
+/*****************************************************************************************/
+
+bool Game::run() {
+	DWORD start_time;
+	LOCK_FPS_PROLOGUE;
+	switch (state) {
+		case ST_PLAYING:
+			show_notice = true;		/* now when user displays menu, show also the notice about closing */
+			respond_to_player();	/* check user input if any and make reaction */
+			if (state == ST_PLAYING) {
+				advance();
+				render();
+			}
+			break;
+		case ST_DEATH:
+			if (!new_attempt()) {	/* there is no attempt left */
+				show_notice = false;
+				flush_keyboard();
+				record_hs();
+			}
+			break;
+		case ST_LEVEL_COMPLETE:
+			show_status();
+			new_level();
+			break;
+		case ST_MENU:
+			show_menu();
+			break;
+		case ST_VIEW_HS:
+			show_hs();
+			break;
+		case ST_RECORD:
+			record_hs();
+			break;
+		case ST_WIN:
+			show_notice = false;
+			show_win();
+			break;
+		case ST_QUIT:
+			savecfg(CFG_FN, hs);
+			play_snd(SND_EXIT);
+			decrease_music();
+			fade_out();
+			if (play_sound) Sleep(700);
+			return false;
+	}
+	LOCK_FPS_EPILOGUE;
+	return true;
+}
+
+/*****************************************************************************************/
+
+Game::~Game() {
+	if (lpSItems) lpSItems->Release();
+	for (int i = WATER_FRAMES-1; i >= 0; i--) 
+		if (lpSScreen[i]) lpSScreen[i]->Release();
+	if (lpSBack) lpSBack->Release();
+	if (lpSPrimary) lpSPrimary->Release();
+	if (lpDD) lpDD->Release();
+	for (int i = NUMMIDIS-1; i >= 0; i--) {
+		if (lpMusic[i]) lpMusic[i]->SetParam(GUID_Unload, -1, 0, 0, (LPVOID) lpDM);
+		if (lpMusic[i]) lpMusic[i]->Release();
+	}
+	if (lpLoader) lpLoader->Release();
+	if (lpDM) {
+		lpDM->CloseDown();
+		lpDM->Release();
+	}
+	for (int i = NUMSOUNDS-1; i >= 0; i--) 	
+		if (lpSound[i]) lpSound[i]->Release();
+	if (lpDS) lpDS->Release();
+	if (lpKeyboard) {
+		lpKeyboard->Unacquire();
+		lpKeyboard->Release();
+	}
+	if (lpDI) lpDI->Release();
+	CoUninitialize();
+}
+
+/*****************************************************************************************/
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+	Game* game = new Game(hInstance);	/* the most important object */
+
+	if (error != ERR_OK) {	/* test if the Game constructor failed */
+		if (lpDD && hwnd) 
+			lpDD->SetCooperativeLevel(hwnd, DDSCL_NORMAL);
+		MessageBox(0, error_msg[error], "FATAL ERROR", MB_OK);
+		delete game;
+		exit(1);
+	}
+
+	Sleep(500);	/* wait until the resolution is set */
+
+	MSG msg;		/* message to be continuously updated */
+	
+	game->show_menu();	/* start with the game menu */
+	
+	while (true) {			/* main program loop */
+		if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+			if (msg.message == WM_QUIT) break;
+			TranslateMessage(&msg);
+			DispatchMessage(&msg);
+		}
+		if (!game->run())	/* break the main loop on exit */
+			break;
+	}
+	
+	delete game;	/* destroy everything */
+
+	return error;
+}
+
+/*****************************************************************************************/
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+	switch(msg) {
+		case WM_KILLFOCUS:
+		case WM_DESTROY:
+			PostQuitMessage(0);
+			return 0;
+		case WM_SYSKEYDOWN:
+		case WM_SYSKEYUP:
+		case WM_SYSCOMMAND:
+			return 1;
+	}
+	return DefWindowProc(hwnd, msg, wparam, lparam);
+}
+
+/*****************************************************************************************/
+
+DWORD file_size(const char* fn) {
+	ifstream fin(fn, ios::binary);
+	if (!fin)
+		return 0;
+	fin.seekg(0, ios::end);
+	DWORD result = fin.tellg();
+	fin.close();
+	return result;
+}
+
+/*****************************************************************************************/
+
+void blit_item(DWORD x, DWORD y, RECT& src_coords) {
+	check_surf(lpSBack);
+	lpSBack->BltFast(x, y, lpSItems, &src_coords, DDBLTFAST_SRCCOLORKEY | DDBLTFAST_WAIT);
+}
+
+/*****************************************************************************************/
+
+void check_surf(LPDIRECTDRAWSURFACE7 surf) {
+	if (surf->IsLost() == DDERR_SURFACELOST)
+		surf->Restore();
+}
+
+/*****************************************************************************************/
+
+int loadlvl(const char* fn, LevelInfo* levinfo) {
+	ifstream fin(fn, ios::binary);
+	if (!fin)
+		return (error = ERR_MISSINGFILE);
+	fin.read((char*) levinfo, sizeof(LevelInfo)*NUMLEVELS);
+	fin.close();
+	return (error = ERR_OK);
+}
+
+/*****************************************************************************************/
+
+int loadpal(const char* fn) {
+	ifstream fin(fn, ios::binary);
+	if (!fin)
+		return (error = ERR_MISSINGFILE);
+	for (int i = 0; i < COLORS; i++) {
+		fin.get((char&) pal[i].peRed);
+		fin.get((char&) pal[i].peGreen);
+		fin.get((char&) pal[i].peBlue);
+		pal[i].peFlags = PC_NOCOLLAPSE;
+	}
+	fin.close();
+	return (error = ERR_OK);
+}
+
+/*****************************************************************************************/
+
+int loadpic(const char* fn, LPDIRECTDRAWSURFACE7 surf, int szx, int szy) {
+	ifstream fin(fn, ios::binary);
+	if (!fin) 
+		return (error = ERR_MISSINGFILE);
+	char* pic = new char[szx*szy];
+	if (!pic)
+		return (error = ERR_MEMORY);
+	fin.read(pic, szx*szy);
+	check_surf(surf);
+	DDSURFACEDESC2 ddsd;
+	ZeroMemory(&ddsd, sizeof(ddsd));
+	ddsd.dwSize = sizeof(ddsd);
+	surf->Lock(NULL, &ddsd, DDLOCK_SURFACEMEMORYPTR | DDLOCK_WAIT, NULL);
+	char* surf_mem = (char*) ddsd.lpSurface;
+	int pitch = ddsd.lPitch;
+	int c = 0;
+	for (int j = 0; j < szy; j++)
+		for (int i = 0; i < szx; i++)	
+			surf_mem[i+pitch*j] = pic[c++];
+	surf->Unlock(NULL);
+  fin.close();
+	delete [] pic;
+	return (error = ERR_OK);
+}
+
+/*****************************************************************************************/
+
+int loadcfg(const char *fn, HighScoreEntry* hs) {
+	ifstream fin(fn, ios::binary);
+	if (!fin) return (error = ERR_MISSINGFILE);
+	/* read checksum */
+	DWORD file_check;
+	fin.read((char*) &file_check, sizeof(DWORD));
+	/* read crypted high score */
+	HighScoreEntry crypt_hs[NUM_NAMES];
+	fin.read((char*) crypt_hs, sizeof(HighScoreEntry)*NUM_NAMES);
+	/* compute actual checksum */
+	DWORD check = 0;
+	for (int i = 0; i < sizeof(HighScoreEntry)*NUM_NAMES; i++)
+		check += (DWORD) ((char*) crypt_hs)[i];
+	/* test checksum */
+	if (file_check != check)
+		return (error = ERR_MISSINGFILE);	/* some lamer corrupted the HighScore */
+	/* decrypt high score */
+	for (int i = 0; i < sizeof(HighScoreEntry)*NUM_NAMES; i++)
+		((char*) crypt_hs)[i] ^= (char) i;
+	memcpy((void*) hs, (void*) crypt_hs, sizeof(HighScoreEntry)*NUM_NAMES);
+	fin.get((char&) music_volume);
+	fin.get((char&) sound_volume);
+	fin.close();
+	return (error = ERR_OK);
+}
+
+/*****************************************************************************************/
+
+void savecfg(const char* fn, HighScoreEntry* hs) {
+	ofstream fout(fn, ios::binary);
+	if (!fout) return;	/* this could mean denied access - a serious problem */
+	/* first encrypt the high score */
+	HighScoreEntry crypt_hs[NUM_NAMES];
+	memcpy((void*) crypt_hs, (void*) hs, sizeof(HighScoreEntry)*NUM_NAMES);
+	for (int i = 0; i < sizeof(HighScoreEntry)*NUM_NAMES; i++)
+		((char*) crypt_hs)[i] ^= (char) i;
+	/* compute checksum for high score */
+	DWORD check = 0;
+	for (int i = 0; i < sizeof(HighScoreEntry)*NUM_NAMES; i++)
+		check += (DWORD) ((char*) crypt_hs)[i];
+	fout.write((char*) &check, sizeof(DWORD));
+	fout.write((char*) crypt_hs, sizeof(HighScoreEntry)*NUM_NAMES);
+	fout.put((char) music_volume);
+	fout.put((char) sound_volume);
+	fout.close();
+}
+
+/*****************************************************************************************/
+
+int loadsnd(const char* fn, LPDIRECTSOUNDBUFFER buf) {
+	DWORD fsize = file_size(fn);
+	ifstream fin(fn, ios::binary);
+	if (!fin)
+		return (error = ERR_MISSINGFILE);
+	if (!play_sound) return (error = ERR_OK);
+	char* snd = new char[fsize];
+	if (!snd)
+		return (error = ERR_MEMORY);
+	fin.read(snd, fsize);
+	char* ptr1 = NULL;		/* the first buffer */
+	DWORD bytes1 = 0;			/* bytes in the first buffer */
+	char* ptr2 = NULL;
+	DWORD bytes2 = 0;
+	/* lock the sound buffer and get the two pointers to write to */
+	if (FAILED(buf->Lock(0, fsize, (LPVOID*) &ptr1, &bytes1, (LPVOID*) &ptr2, &bytes2, DSBLOCK_ENTIREBUFFER)))
+		return (error = ERR_GENERIC);
+	memcpy(ptr1, snd, bytes1);
+	memcpy(ptr2, snd + bytes1, bytes2);
+	buf->Unlock(ptr1, bytes1, ptr2, bytes2);
+	buf->SetCurrentPosition(0);
+	fin.close();
+	delete [] snd;
+	return (error = ERR_OK);
+}
+
+/*****************************************************************************************/
+
+int loadmus(const char* fn, IDirectMusicSegment** seg) {
+	/* check if the file is present */
+	ifstream fin(fn, ios::binary);
+	if (!fin)	return (error = ERR_MISSINGFILE);
+	fin.close();
+	/* if unable to play music, return immediately with no error */
+	if (!play_music) return (error = ERR_OK);
+	/* set the search path to working directory */
+	WCHAR search_path[_MAX_PATH];
+	_wgetcwd(search_path, _MAX_PATH);
+	lpLoader->SetSearchDirectory(GUID_DirectMusicAllTypes, search_path, false);
+	/* convert the file name fn to wide characters */
+	WCHAR fn_wide[20];
+	MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, fn, -1, fn_wide, 20);
+	DMUS_OBJECTDESC desc;
+	ZeroMemory(&desc, sizeof(desc));
+	desc.dwSize = sizeof(desc);
+	desc.dwValidData = DMUS_OBJ_CLASS | DMUS_OBJ_FILENAME;
+	desc.guidClass = CLSID_DirectMusicSegment;
+	wcscpy(desc.wszFileName, fn_wide);
+	/* create the music segment */
+	play_music = play_music && SUCCEEDED(lpLoader->GetObject(&desc, IID_IDirectMusicSegment, (void**) seg));
+	if (!play_music) return (error = ERR_OK);
+	(*seg)->SetParam(GUID_StandardMIDIFile, (DWORD) -1, 0, 0, (LPVOID) lpDM);
+	(*seg)->SetParam(GUID_Download, -1, 0, 0, (LPVOID) lpDM);
+	(*seg)->SetParam(GUID_EnableTempo, -1, 0, 0, NULL);
+	return (error = ERR_OK);
+}
+
+/*****************************************************************************************/
+
+void play_snd(int snd_number) {
+	if (play_sound)
+    lpSound[snd_number]->Play(0, 0, 0);
+}
+
+/*****************************************************************************************/
+
+void stop_snd(int snd_number) {
+	if (play_sound) {
+		lpSound[snd_number]->Stop();
+		lpSound[snd_number]->SetCurrentPosition(0);
+	}
+}
+
+/*****************************************************************************************/
+
+bool is_snd_playing(int snd_number) {
+	if (!play_sound) return false;
+	DWORD state;
+	lpSound[snd_number]->GetStatus(&state);
+	return (state == DSBSTATUS_PLAYING);
+}
+
+/*****************************************************************************************/
+
+void play_mus(int mus_number) {
+	if (play_music) 
+		lpDM->PlaySegment(lpMusic[mus_number], 0, 0, &lpStates[mus_number]);
+}
+
+/*****************************************************************************************/
+
+void stop_mus(int mus_number) {
+	if (play_music)
+    lpDM->Stop(lpMusic[mus_number], lpStates[mus_number], 0, 0);
+}
+
+/*****************************************************************************************/
+
+bool is_mus_playing(int mus_number) {
+	return (lpDM->IsPlaying(lpMusic[mus_number], NULL) == S_OK);
+}
+
+/*****************************************************************************************/
+
+bool is_mus_playing() {
+	for (int i = 0; i < NUMMIDIS; i++) {
+		if (is_mus_playing(i)) return true;
+	}
+	return false;
+}
+
+/*****************************************************************************************/
+
+void show_number(int x, int y, DWORD number) {
+	static BYTE stack[20];
+	int cnt = 0;
+	if (number > 0) {
+		while (number > 0) {
+			stack[cnt++] = (BYTE)(number % 10);
+			number /= 10;
+		}
+	}	else {
+		stack[0] = 0;
+		cnt = 1;
+	}
+	for (int i = cnt-1; i >= 0; i--)
+		blit_item(x + (cnt - 1 - i) * NUMBER_SIZEX, y, NUMBERS[stack[i]]);
+}
+
+/*****************************************************************************************/
+
+void show_text(int x, int y, char* text) {
+	for (WORD i = 0; i < strlen(text); i++) {
+		if (text[i] < 'A' || text[i] > 'Z')
+			continue;		/* show only characters A - Z */
+		int lit_ofs = (int) text[i] - 'A';		/* offset of the literal (0 for A, 1 for B....) */
+		RECT rect = FIRST_CHAR;
+		rect.left += lit_ofs*(CHAR_SIZEX+1);
+		rect.right += lit_ofs*(CHAR_SIZEX+1);
+		blit_item(x + i*CHAR_SIZEX, y, rect);
+	}
+}
+
+/*****************************************************************************************/
+
+bool get_text(char* text, int max_len) {
+	/* The function is called from Game::record_hs() and is called over and over again
+	 until the user enters a text; only a single character per call is registered.
+	 It returns true if some text was entered following with the [enter] key, false
+	 otherwise. */
+	static int cnt = 0;
+	GET_KEYBOARD_DATA;
+	if (!KEY_DOWN(0)) return false;		/* return if nothing pressed */
+	if (data_array[0].dwOfs == DIK_RETURN && cnt == 0) /* nothing actually entered yet */
+		return false;
+	if (data_array[0].dwOfs == DIK_RETURN) {	/* the only possibility to return true */
+		text[cnt] = 0;
+		cnt = 0;
+		return true;
+	}
+	else if (data_array[0].dwOfs == DIK_BACK && cnt > 0) {	/* remove one char on backspace */
+		text[--cnt] = 0;
+		return false;
+	}
+	if (cnt == max_len) return false;
+	switch (data_array[0].dwOfs) {
+		case DIK_A: text[cnt++] = 'A'; break; 
+		case DIK_B: text[cnt++] = 'B'; break;
+		case DIK_C: text[cnt++] = 'C'; break;
+		case DIK_D: text[cnt++] = 'D'; break;
+		case DIK_E: text[cnt++] = 'E'; break;
+		case DIK_F: text[cnt++] = 'F'; break;
+		case DIK_G: text[cnt++] = 'G'; break;
+		case DIK_H: text[cnt++] = 'H'; break;
+		case DIK_I: text[cnt++] = 'I'; break;
+		case DIK_J: text[cnt++] = 'J'; break;
+		case DIK_K: text[cnt++] = 'K'; break;
+		case DIK_L: text[cnt++] = 'L'; break;
+		case DIK_M: text[cnt++] = 'M'; break;
+		case DIK_N: text[cnt++] = 'N'; break;
+		case DIK_O: text[cnt++] = 'O'; break;
+		case DIK_P: text[cnt++] = 'P'; break;
+		case DIK_Q: text[cnt++] = 'Q'; break;
+		case DIK_R: text[cnt++] = 'R'; break;
+		case DIK_S: text[cnt++] = 'S'; break;
+		case DIK_T: text[cnt++] = 'T'; break;
+		case DIK_U: text[cnt++] = 'U'; break;
+		case DIK_V: text[cnt++] = 'V'; break;
+		case DIK_W: text[cnt++] = 'W'; break;
+		case DIK_X: text[cnt++] = 'X'; break;
+		case DIK_Y: text[cnt++] = 'Y'; break;
+		case DIK_Z: text[cnt++] = 'Z'; break;
+		case DIK_SPACE: text[cnt++] = ' '; break;
+	}
+	text[cnt] = 0;
+	return false;
+}
+
+/*****************************************************************************************/
+
+void flush_keyboard() {
+	GET_KEYBOARD_DATA;
+}
+
+/*****************************************************************************************/
+
+void apply_music_vol() {
+	if (!play_music) return;
+	if (music_volume < 0 || music_volume > 3)
+		music_volume = 2;
+	long volume;
+	switch(music_volume) {
+		case 0: volume = -10000; break;
+		case 1: volume = -1400; break;
+		case 2: volume = -500; break;
+		case 3: volume = 0; break;
+	}
+	lpDM->SetGlobalParam(GUID_PerfMasterVolume, (LPVOID) &volume, sizeof(long));
+}
+
+/*****************************************************************************************/
+
+void decrease_music() {
+	if (!play_music) return;
+	if (--music_volume < 0) music_volume = 0;	/* ensure that volume stays nonnegative */
+	apply_music_vol();
+}
+
+/*****************************************************************************************/
+
+void apply_sound_vol() {
+	if (!play_sound) return;
+	if (sound_volume < 0 || sound_volume > 3)
+		sound_volume = 2;
+	for (int i = 0; i < NUMSOUNDS; i++) {
+		switch(sound_volume) {
+			case 0: lpSound[i]->SetVolume(-10000); break;
+			case 1: lpSound[i]->SetVolume(-1900); break;
+			case 2: lpSound[i]->SetVolume(-1000); break;
+			case 3: lpSound[i]->SetVolume(0); break;
+		}		
+	}
+}
+
+/*****************************************************************************************/
+
+void decrease_sound() {
+	if (!play_sound) return;
+	if (--sound_volume < 0) sound_volume = 0;
+	apply_sound_vol();
+}
+
+/*****************************************************************************************/
+
+void increase_music() {
+	if (!play_music) return;
+	if (++music_volume > 3) music_volume = 3;	/* ensure that volume stays nonnegative */
+	apply_music_vol();
+}
+
+/*****************************************************************************************/
+
+void increase_sound() {
+	if (!play_sound) return;
+	if (++sound_volume > 3) sound_volume = 3;
+	apply_sound_vol();
+}
+
+/*****************************************************************************************/
+
+void show_soundvol() {
+	if (!play_sound) {
+		blit_item(MENU_BEGINX + 119, MENU_BEGINY + 244, VOLUME_COORD);
+		return;
+	}
+	switch (sound_volume) {
+		case 0: blit_item(MENU_BEGINX + 119, MENU_BEGINY + 244, VOLUME_COORD); break;
+		case 1: blit_item(MENU_BEGINX + 203, MENU_BEGINY + 244, VOLUME_COORD); break;
+		case 2: blit_item(MENU_BEGINX + 287, MENU_BEGINY + 244, VOLUME_COORD); break;
+		case 3: blit_item(MENU_BEGINX + 381, MENU_BEGINY + 244, VOLUME_COORD); break;
+	}
+}
+
+/*****************************************************************************************/
+
+void show_musicvol() {
+	if (!play_music) {
+		blit_item(MENU_BEGINX + 119, MENU_BEGINY + 189, VOLUME_COORD);
+		return;
+	}
+	switch (music_volume) {
+		case 0: blit_item(MENU_BEGINX + 119, MENU_BEGINY + 189, VOLUME_COORD); break;
+		case 1: blit_item(MENU_BEGINX + 203, MENU_BEGINY + 189, VOLUME_COORD); break;
+		case 2: blit_item(MENU_BEGINX + 287, MENU_BEGINY + 189, VOLUME_COORD); break;
+		case 3: blit_item(MENU_BEGINX + 381, MENU_BEGINY + 189, VOLUME_COORD); break;
+	}
+}
+
+/*****************************************************************************************/
+
+unsigned __int64 checksum(const char* fn) {
+	DWORD fsize = file_size(fn);
+	ifstream fin(fn, ios::binary);
+	if (!fin) {
+		error = ERR_MISSINGFILE;
+		return 0;
+	}
+	unsigned char* data = new unsigned char[fsize];
+	if (!data) {
+		error = ERR_MEMORY;	
+		return 0;
+	}
+	fin.read((char*) data, fsize);
+	unsigned __int64 result = 0;
+	DWORD j;
+	for (DWORD i = 0; i < fsize; i++) {
+		j = (i >= 1) ? i - 1: i;
+		result += (data[i] + data[j]);
+	}
+	delete [] data;
+	fin.close();
+	error = ERR_OK;
+	return result;
+}
+
+/*****************************************************************************************/
+
+int check_files() {
+#define CORRECT 948266755		/* correct checksum */	
+	unsigned __int64 sum = 0;
+	sum += checksum(PAL_FN);
+	if (error != ERR_OK) return error;
+	sum += checksum(LVL_FN);
+	if (error != ERR_OK) return error;
+	sum += checksum(ITEMS_FN);
+	if (error != ERR_OK) return error;
+	for (int i = 0; i < WATER_FRAMES; i++) {
+		char fn[20];
+		sprintf(fn, WATER_FN, i+1);
+		sum += checksum(fn);
+		if (error != ERR_OK) return error;
+	}
+	for (int i = 0; i < NUMSOUNDS; i++) {
+		char fn[20];
+		sprintf(fn, SOUND_FN, i+1);
+		sum += checksum(fn);
+		if (error != ERR_OK) return error;
+	}
+	for (int i = 0; i < NUMMIDIS; i++) {
+		char fn[20];
+		sprintf(fn, MUSIC_FN, i+1);
+		sum += checksum(fn);
+		if (error != ERR_OK) return error;
+	}
+	if (sum != CORRECT) return (error = ERR_MISSINGFILE);
+	return ERR_OK;
+}
+
+/*****************************************************************************************/
+
+void fade_in() {
+	static PALETTEENTRY tmp[COLORS];
+	for (int i = 0; i < COLORS; i++) {
+		tmp[i].peRed = 0;
+		tmp[i].peGreen = 0;
+		tmp[i].peBlue = 0;
+		tmp[i].peFlags = PC_NOCOLLAPSE;
+	}
+	for (int j = 0; j < COLORS; j++) {	
+		for (int i = 0; i < COLORS; i++) {
+			if (tmp[i].peRed < pal[i].peRed) tmp[i].peRed++;
+			if (tmp[i].peGreen < pal[i].peGreen) tmp[i].peGreen++;
+			if (tmp[i].peBlue < pal[i].peBlue) tmp[i].peBlue++;
+		}
+		lpPal->SetEntries(0, 0, COLORS, tmp);
+		Sleep(5);
+	}
+	lpPal->SetEntries(0, 0, COLORS, pal);
+}
+
+/*****************************************************************************************/
+
+void fade_out() {
+	for (int j = 0; j < COLORS; j++) {	
+		for (int i = 0; i < COLORS; i++) {
+			if (pal[i].peRed >= 1) pal[i].peRed -= 1;
+			if (pal[i].peGreen >= 1) pal[i].peGreen -= 1;
+			if (pal[i].peBlue >= 1) pal[i].peBlue -= 1;
+		}
+		lpPal->SetEntries(0, 0, COLORS, pal);
+		Sleep(5);
+	}
+	check_surf(lpSPrimary);
+	DDSURFACEDESC2 ddsd;
+	ZeroMemory(&ddsd, sizeof(ddsd));
+	ddsd.dwSize = sizeof(ddsd);
+	lpSPrimary->Lock(NULL, &ddsd, DDLOCK_SURFACEMEMORYPTR | DDLOCK_WAIT, NULL);
+	char* surf_mem = (char*) ddsd.lpSurface;
+	int pitch = ddsd.lPitch;
+	for (int j = 0; j < SCREENY; j++)
+		for (int i = 0; i < SCREENX; i++)	
+			surf_mem[i+pitch*j] = 0;
+	lpSPrimary->Unlock(NULL);
+}
+
+/*****************************************************************************************/
